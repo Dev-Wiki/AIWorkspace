@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "AI Workspace",
   "version": "0.1.0",
-  "identifier": "com.aiworkspace.app",
+  "identifier": "com.aiskillmanager.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-app",
-        "width": 800,
-        "height": 600
+        "title": "AI Workspace",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 980,
+        "minHeight": 680
       }
     ],
     "security": {
