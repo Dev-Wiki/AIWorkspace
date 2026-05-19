@@ -401,6 +401,11 @@ fn wsl_realpath(unix_path: &str) -> Result<String, String> {
 #[cfg(target_os = "windows")]
 fn shlex_quote(s: &str) -> String {
     // Simple shell quoting for WSL
+    if s == "~" {
+        return "$HOME".to_string();
+    } else if let Some(stripped) = s.strip_prefix("~/") {
+        return format!("$HOME/'{}'", stripped.replace('\'', "'\\''"));
+    }
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -413,9 +418,10 @@ fn create_junction(target: &Path, source: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to create parent dir: {}", e))?;
     let output = Command::new("cmd")
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["/c", "chcp 65001 > nul && mklink", "/J",
+        .arg("/c")
+        .raw_arg(format!("chcp 65001 > nul && mklink /J \"{}\" \"{}\"",
             target.to_str().ok_or("invalid target path")?,
-            source.to_str().ok_or("invalid source path")?])
+            source.to_str().ok_or("invalid source path")?))
         .output()
         .map_err(|e| format!("mklink error: {}", e))?;
     if output.status.success() {
@@ -445,7 +451,8 @@ fn create_directory_link(target: &Path, source: &Path) -> Result<(), String> {
 fn remove_link(target: &Path) -> Result<(), String> {
     Command::new("cmd")
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["/c", "chcp 65001 > nul && rmdir", target.to_str().ok_or("invalid path")?])
+        .arg("/c")
+        .raw_arg(format!("chcp 65001 > nul && rmdir \"{}\"", target.to_str().ok_or("invalid path")?))
         .output()
         .map_err(|e| format!("rmdir error: {}", e))?;
     Ok(())
@@ -835,7 +842,7 @@ fn move_item(content_type: String, name: String, enabled: bool) -> Result<(), St
 }
 
 #[tauri::command]
-fn save_and_sync(
+async fn save_and_sync(
     linked_agents: Vec<String>,
     items_to_move: Vec<ItemMove>,
 ) -> Result<SyncResult, String> {

@@ -536,7 +536,7 @@ function App() {
               清空
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed space-y-1">
+          <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed space-y-1 select-text">
             {logs.length === 0 ? (
               <p className="text-slate-600 italic">暂无活动记录。</p>
             ) : (
