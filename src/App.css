@@ -1,6 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&display=swap');
 @import "tailwindcss";
 
 @theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --color-brand-500: #10b981;
   --color-brand-600: #059669;
 }
@@ -11,7 +13,7 @@ html, body, #root {
 }
 
 body {
-  @apply bg-slate-100 text-slate-900;
+  @apply bg-[#020617] text-slate-200 antialiased;
 }
 
 /* Scrollbar styling */
@@ -21,15 +23,15 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-slate-100;
+  @apply bg-[#020617];
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-slate-300 rounded-full;
+  @apply bg-slate-700 rounded-full;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  @apply bg-slate-400;
+  @apply bg-slate-500;
 }
 
 /* Checkbox focus styling */
