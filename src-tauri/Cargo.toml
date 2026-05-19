@@ -1,12 +1,12 @@
 [package]
-name = "tauri-app"
+name = "ai-workspace"
 version = "0.1.0"
 description = "AI Workspace - Unified Capability Management for Agents"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "tauri_app_lib"
+name = "ai_workspace_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

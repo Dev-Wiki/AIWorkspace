@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ── Data Structures ──────────────────────────────────────────────
 
@@ -321,13 +327,18 @@ fn all_targets() -> Vec<AgentTarget> {
 
 // ── WSL Helpers ──────────────────────────────────────────────────
 
+static CACHED_WSL_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
 #[cfg(target_os = "windows")]
 fn wsl_available() -> bool {
-    Command::new("where")
-        .arg("wsl.exe")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    *CACHED_WSL_AVAILABLE.get_or_init(|| {
+        Command::new("where")
+            .creation_flags(CREATE_NO_WINDOW)
+            .arg("wsl.exe")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -338,6 +349,7 @@ fn wsl_available() -> bool {
 #[cfg(target_os = "windows")]
 fn run_wsl(args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("wsl.exe")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(args)
         .output()
         .map_err(|e| format!("wsl error: {}", e))
@@ -367,13 +379,6 @@ fn windows_to_wsl_path(win_path: &str) -> Result<String, String> {
             Ok(s.to_string())
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn wsl_dir_exists(unix_path: &str) -> bool {
-    run_wsl_shell(&format!("test -d {}", shlex_quote(unix_path)))
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -407,7 +412,8 @@ fn create_junction(target: &Path, source: &Path) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|e| format!("Failed to create parent dir: {}", e))?;
     let output = Command::new("cmd")
-        .args(["/c", "mklink", "/J",
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "chcp 65001 > nul && mklink", "/J",
             target.to_str().ok_or("invalid target path")?,
             source.to_str().ok_or("invalid source path")?])
         .output()
@@ -438,7 +444,8 @@ fn create_directory_link(target: &Path, source: &Path) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn remove_link(target: &Path) -> Result<(), String> {
     Command::new("cmd")
-        .args(["/c", "rmdir", target.to_str().ok_or("invalid path")?])
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "chcp 65001 > nul && rmdir", target.to_str().ok_or("invalid path")?])
         .output()
         .map_err(|e| format!("rmdir error: {}", e))?;
     Ok(())
@@ -522,14 +529,13 @@ fn backup_existing_wsl(unix_target: &str) -> Result<String, String> {
 
 fn scan_available_targets() -> Vec<AgentTarget> {
     let mut targets = all_targets();
+
+    // 只检查一次 WSL 是否可用（缓存），不逐个调 wsl.exe 查目录
+    let wsl_ok = wsl_available();
+
     for t in &mut targets {
         if t.backend == "wsl" {
-            if wsl_available() {
-                let parent = Path::new(&t.path).parent().map(|p| p.to_string_lossy().to_string());
-                if let Some(p) = parent {
-                    t.available = wsl_dir_exists(&p);
-                }
-            }
+            t.available = wsl_ok;
         } else {
             let parent = expanded_path(&t.path)
                 .parent()
