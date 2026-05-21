@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.2] - 2026-05-21
+
+### Changed
+- 适配 Antigravity 新版双版本架构，新增 `antigravity-skills` 和 `antigravity-ide-skills` 支持。
+
 ## [v0.1.1] - 2026-05-21
 
 ### Added
