@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Settings, FolderOpen, RefreshCw, CheckSquare, Square, ChevronRight, ChevronLeft, Terminal, AlertCircle, FileCode2, Search } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Settings, FolderOpen, RefreshCw, CheckSquare, Square, Terminal, AlertCircle, FileCode2, Search, Save, Trash2, Plus, X, CheckCircle2, Info } from "lucide-react";
 import "./App.css";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -25,16 +27,18 @@ interface Item {
   enabled: boolean;
 }
 
-interface ItemMove {
-  content_type: string;
-  name: string;
-  enabled: boolean;
-}
-
 interface SyncResult {
   log: string;
   moved_count: number;
   has_errors: boolean;
+}
+
+interface Profile {
+  name: string;
+  skills: string[];
+  rules: string[];
+  plugins: string[];
+  mcps: string[];
 }
 
 const CONTENT_TYPES = ["skills", "rules", "plugins", "mcps"] as const;
@@ -59,25 +63,51 @@ function App() {
   // UI state
   const [currentType, setCurrentType] = useState<ContentType>("skills");
   const [targets, setTargets] = useState<AgentTarget[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
+  const [items, setItems] = useState<Item[]>([]); // All items on disk for currentType
   const [agentVars, setAgentVars] = useState<Record<string, boolean>>({});
-  const [itemVars, setItemVars] = useState<Record<string, boolean>>({});
-  const [originalItemStates, setOriginalItemStates] = useState<
-    Record<string, boolean>
-  >({});
+  
+  // Profile state
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [currentProfile, setCurrentProfile] = useState<Profile>({
+    name: "Custom",
+    skills: [],
+    rules: [],
+    plugins: [],
+    mcps: [],
+  });
+
   const [searchText, setSearchText] = useState("");
   const [status, setStatus] = useState("");
   const [logs, setLogs] = useState<string[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [defaultRepo, setDefaultRepo] = useState("");
-  const [showLogs, setShowLogs] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
+  // Modals & Toast State
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [toast, setToast] = useState<{text: string, type: 'success' | 'error' | 'info'} | null>(null);
+  const [profileModal, setProfileModal] = useState({ isOpen: false, isNew: false, inputName: "" });
+  const [confirmModal, setConfirmModal] = useState<{isOpen: boolean, message: string, confirmText?: string, onConfirm: () => void}>({isOpen: false, message: "", confirmText: "确认", onConfirm: () => {}});
+
+  const showToast = (text: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setToast({text, type});
+    setTimeout(() => setToast(null), 3000);
+  };
 
   // ── Initialization ───────────────────────────────────────────
 
   useEffect(() => {
     loadConfig();
     invoke<string>("get_repo_default").then(setDefaultRepo).catch(() => {});
+    getVersion().then(setAppVersion).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (config.repo_root) {
+      initCurrentState();
+    }
+  }, [config.repo_root]);
 
   useEffect(() => {
     if (config.repo_root) {
@@ -89,11 +119,42 @@ function App() {
     try {
       const cfg = await invoke<Config>("get_config");
       setConfig(cfg);
-      if (cfg.repo_root) {
-        setConfig(cfg);
-      }
     } catch (e) {
       console.error("loadConfig:", e);
+    }
+  };
+
+  const initCurrentState = async () => {
+    try {
+      const ps = await invoke<Profile[]>("get_profiles");
+      setProfiles(ps);
+
+      const [skills, rules, plugins, mcps] = await Promise.all([
+        invoke<Item[]>("get_items", { contentType: "skills" }),
+        invoke<Item[]>("get_items", { contentType: "rules" }),
+        invoke<Item[]>("get_items", { contentType: "plugins" }),
+        invoke<Item[]>("get_items", { contentType: "mcps" }),
+      ]);
+
+      const cp: Profile = {
+        name: "Custom",
+        skills: skills.filter((i) => i.enabled).map((i) => i.name),
+        rules: rules.filter((i) => i.enabled).map((i) => i.name),
+        plugins: plugins.filter((i) => i.enabled).map((i) => i.name),
+        mcps: mcps.filter((i) => i.enabled).map((i) => i.name),
+      };
+      
+      // Check if it matches an existing profile exactly
+      const matched = ps.find(p => 
+        JSON.stringify([...p.skills].sort()) === JSON.stringify([...cp.skills].sort()) &&
+        JSON.stringify([...p.rules].sort()) === JSON.stringify([...cp.rules].sort()) &&
+        JSON.stringify([...p.plugins].sort()) === JSON.stringify([...cp.plugins].sort()) &&
+        JSON.stringify([...p.mcps].sort()) === JSON.stringify([...cp.mcps].sort())
+      );
+
+      setCurrentProfile(matched ? matched : cp);
+    } catch (e) {
+      console.error("initCurrentState:", e);
     }
   };
 
@@ -105,13 +166,11 @@ function App() {
       ]);
       setTargets(t);
 
-      // Preserve existing agent checkbox states, initialize new ones based on config
       const newAgentVars: Record<string, boolean> = {};
       for (const target of t) {
         if (target.id in agentVars) {
           newAgentVars[target.id] = agentVars[target.id];
         } else {
-          // Default: checked if in linked_agents, or if linked_agents is empty and target is managed
           newAgentVars[target.id] =
             config.linked_agents.length === 0
               ? true
@@ -119,22 +178,8 @@ function App() {
         }
       }
       setAgentVars(newAgentVars);
-
-      // Preserve existing item checkbox states, initialize new ones from disk
-      const newItemVars: Record<string, boolean> = {};
-      const newOriginal: Record<string, boolean> = {};
-      for (const item of i) {
-        if (item.name in itemVars) {
-          newItemVars[item.name] = itemVars[item.name];
-        } else {
-          newItemVars[item.name] = item.enabled;
-        }
-        newOriginal[item.name] = item.enabled;
-      }
-      setItemVars(newItemVars);
-      setOriginalItemStates(newOriginal);
       setItems(i);
-      updateStatus(newAgentVars, newItemVars);
+      updateStatus(newAgentVars, currentProfile, i);
     } catch (e) {
       console.error("loadContent:", e);
     }
@@ -144,20 +189,26 @@ function App() {
 
   const updateStatus = (
     agents: Record<string, boolean>,
-    iv: Record<string, boolean>
+    profile: Profile,
+    currentItems: Item[] = items
   ) => {
     const linked = Object.values(agents).filter(Boolean).length;
-    const enabled = Object.values(iv).filter(Boolean).length;
-    const disabled = Object.keys(iv).length - enabled;
+    const enabled = profile[currentType].length;
+    const total = currentItems.length;
+    const disabled = total - enabled;
     const label = CONTENT_LABELS[currentType];
     if (!config.repo_root) {
       setStatus("仓库未配置");
     } else {
       setStatus(
-        `已链接 Agent：${linked}    当前：${label}    已启用：${enabled}    已禁用：${disabled}`
+        `已链接 Agent：${linked}    当前：${label}    已启用：${enabled}    已禁用：${disabled >= 0 ? disabled : 0}`
       );
     }
   };
+
+  useEffect(() => {
+    updateStatus(agentVars, currentProfile, items);
+  }, [agentVars, currentProfile, items, currentType]);
 
   // ── Actions ──────────────────────────────────────────────────
 
@@ -174,9 +225,10 @@ function App() {
         repoRoot: dir,
       });
       setConfig(cfg);
+      showToast('仓库配置成功', 'success');
       setLogs((prev) => [...prev, `仓库已配置：${cfg.repo_root}`]);
     } catch (e) {
-      console.error("configure_repo:", e);
+      showToast(`配置失败: ${e}`, 'error');
       setLogs((prev) => [...prev, `[错误] ${e}`]);
     }
   };
@@ -189,30 +241,77 @@ function App() {
     }
   };
 
-  const handleOpenEnabled = () => {
-    if (config.repo_root) {
-      invoke("open_directory", {
-        path: `${config.repo_root}/${currentType}/enabled`,
-      }).catch((e) => console.error(e));
-    }
-  };
-
-  const handleOpenDisabled = () => {
-    if (config.repo_root) {
-      invoke("open_directory", {
-        path: `${config.repo_root}/${currentType}/disabled`,
-      }).catch((e) => console.error(e));
-    }
-  };
-
   const handleRefresh = () => {
     setSearchText("");
+    initCurrentState();
     loadContent();
+    showToast('已刷新配置', 'info');
+  };
+
+  const openSaveProfileModal = (saveAsNew: boolean) => {
+    let name = currentProfile.name;
+    setProfileModal({
+      isOpen: true,
+      isNew: saveAsNew,
+      inputName: (saveAsNew || name === "Custom") ? "" : name
+    });
+  };
+
+  const confirmSaveProfile = async () => {
+    const name = profileModal.inputName.trim();
+    if (!name) return;
+    try {
+      const newP = { ...currentProfile, name };
+      await invoke("save_profile", { profile: newP });
+      const ps = await invoke<Profile[]>("get_profiles");
+      setProfiles(ps);
+      setCurrentProfile(newP);
+      showToast(`保存 Profile 成功：${name}`, 'success');
+      setLogs((prev) => [...prev, `[+] 保存 Profile 成功：${name}`]);
+    } catch (e) {
+      showToast(`保存 Profile 失败: ${e}`, 'error');
+      setLogs((prev) => [...prev, `[!] 保存 Profile 失败: ${e}`]);
+    }
+    setProfileModal({ ...profileModal, isOpen: false });
+  };
+
+  const handleDeleteProfile = () => {
+    if (currentProfile.name === "Custom") return;
+    setConfirmModal({
+      isOpen: true,
+      message: `确定要删除 Profile '${currentProfile.name}' 吗？此操作无法撤销。`,
+      onConfirm: async () => {
+        try {
+          await invoke("delete_profile", { name: currentProfile.name });
+          const ps = await invoke<Profile[]>("get_profiles");
+          setProfiles(ps);
+          setCurrentProfile({ ...currentProfile, name: "Custom" });
+          showToast(`已删除 Profile：${currentProfile.name}`, 'info');
+          setLogs((prev) => [...prev, `[-] 删除 Profile：${currentProfile.name}`]);
+        } catch (e) {
+          showToast(`删除 Profile 失败: ${e}`, 'error');
+          setLogs((prev) => [...prev, `[!] 删除 Profile 失败: ${e}`]);
+        }
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      }
+    });
+  };
+
+  const handleSelectProfile = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const pName = e.target.value;
+    if (pName === "Custom") {
+      setCurrentProfile({ ...currentProfile, name: "Custom" });
+      return;
+    }
+    const p = profiles.find((x) => x.name === pName);
+    if (p) {
+      setCurrentProfile(p);
+    }
   };
 
   const handleSaveAndSync = async () => {
     if (!config.repo_root) {
-      setLogs((prev) => [...prev, "[错误] 请先配置仓库"]);
+      showToast("请先配置仓库", "error");
       return;
     }
 
@@ -220,87 +319,108 @@ function App() {
       .filter(([, v]) => v)
       .map(([k]) => k);
 
-    // Compute moved items
-    const itemsToMove: ItemMove[] = [];
-    for (const name of Object.keys(itemVars)) {
-      const current = itemVars[name];
-      const original = originalItemStates[name];
-      if (current !== original) {
-        itemsToMove.push({
-          content_type: currentType,
-          name,
-          enabled: current,
-        });
-      }
-    }
-
-    // Collect items from other content types (not currently displayed) without changes
-    // We don't track changes for non-visible tabs, so we send empty moves for them
-    // The backend will handle the actual state from disk
-
     setSyncing(true);
-    setLogs((prev) => [...prev, "开始同步..."]);
+    setLogs((prev) => {
+      const newLogs = [...prev, `开始同步 (Profile: ${currentProfile.name})...`];
+      return newLogs.slice(-1000);
+    });
+    
     try {
-      const result = await invoke<SyncResult>("save_and_sync", {
-        linkedAgents: selectedAgents,
-        itemsToMove: itemsToMove,
+      const result = await invoke<SyncResult>("apply_profile_and_sync", {
+        repoRoot: config.repo_root,
+        profile: currentProfile,
+        selectedAgents: selectedAgents,
       });
-      setConfig((prev) => ({
-        ...prev,
-        linked_agents: selectedAgents,
-      }));
-      setLogs((prev) => [...prev, ...result.log.split("\n").filter(Boolean)]);
-      setLogs((prev) => [
-        ...prev,
-        result.has_errors
-          ? "同步完成（有警告）"
-          : `同步完成，移动项目：${result.moved_count}`,
-      ]);
-      // Refresh items to get new state from disk after move
-      const i = await invoke<Item[]>("get_items", {
-        contentType: currentType,
+      setConfig((prev) => ({ ...prev, linked_agents: selectedAgents }));
+      setLogs((prev) => {
+        const newLogs = [
+          ...prev, 
+          ...result.log.split("\n").filter(Boolean),
+          result.has_errors ? "同步完成（有警告）" : "同步完成"
+        ];
+        return newLogs.slice(-1000); // 截断防止 UI 卡死
       });
-      const newItemVars: Record<string, boolean> = {};
-      const newOriginal: Record<string, boolean> = {};
-      for (const item of i) {
-        newItemVars[item.name] = item.enabled;
-        newOriginal[item.name] = item.enabled;
-      }
-      setItemVars(newItemVars);
-      setOriginalItemStates(newOriginal);
-      setItems(i);
-      updateStatus(agentVars, newItemVars);
+      showToast(result.has_errors ? "同步完成（有警告）" : "同步成功", result.has_errors ? 'error' : 'success');
+      loadContent();
     } catch (e) {
-      console.error("save_and_sync:", e);
-      setLogs((prev) => [...prev, `[错误] ${e}`]);
+      console.error("apply_profile_and_sync:", e);
+      showToast(`同步失败: ${e}`, 'error');
+      setLogs((prev) => {
+        const newLogs = [...prev, `[错误] ${e}`];
+        return newLogs.slice(-1000);
+      });
     } finally {
       setSyncing(false);
     }
   };
 
+  const handleCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const res = await fetch("https://api.github.com/repos/Dev-Wiki/AIWorkspace/releases/latest");
+      const data = await res.json();
+      if (!data.tag_name) throw new Error("Invalid response");
+      const latest = data.tag_name;
+      const current = appVersion.startsWith("v") ? appVersion : `v${appVersion}`;
+      const latestFormatted = latest.startsWith("v") ? latest : `v${latest}`;
+      
+      if (latestFormatted !== current) {
+        setConfirmModal({
+          isOpen: true,
+          message: `发现新版本 ${latestFormatted} (当前 ${current})，是否前往浏览器下载？`,
+          confirmText: "前往下载",
+          onConfirm: async () => {
+            await openUrl(data.html_url);
+            setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          }
+        });
+      } else {
+        showToast("当前已是最新版本", "success");
+      }
+    } catch (e) {
+      showToast("检查更新失败，请稍后重试", "error");
+      setLogs((prev) => {
+        const newLogs = [...prev, `[!] 检查更新失败: ${e}`];
+        return newLogs.slice(-1000);
+      });
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const toggleItem = (name: string) => {
+    setCurrentProfile(prev => {
+      const list = [...prev[currentType]];
+      if (list.includes(name)) {
+        list.splice(list.indexOf(name), 1);
+      } else {
+        list.push(name);
+      }
+      return { ...prev, name: "Custom", [currentType]: list };
+    });
+  };
+
   const selectAll = () => {
-    setItemVars((prev) => {
-      const next = { ...prev };
+    setCurrentProfile(prev => {
+      const nextList = [...prev[currentType]];
       for (const item of items) {
         if (searchText === "" || item.name.toLowerCase().includes(searchText.toLowerCase())) {
-          next[item.name] = true;
+          if (!nextList.includes(item.name)) nextList.push(item.name);
         }
       }
-      updateStatus(agentVars, next);
-      return next;
+      return { ...prev, name: "Custom", [currentType]: nextList };
     });
   };
 
   const deselectAll = () => {
-    setItemVars((prev) => {
-      const next = { ...prev };
+    setCurrentProfile(prev => {
+      let nextList = [...prev[currentType]];
       for (const item of items) {
         if (searchText === "" || item.name.toLowerCase().includes(searchText.toLowerCase())) {
-          next[item.name] = false;
+          nextList = nextList.filter(n => n !== item.name);
         }
       }
-      updateStatus(agentVars, next);
-      return next;
+      return { ...prev, name: "Custom", [currentType]: nextList };
     });
   };
 
@@ -311,8 +431,6 @@ function App() {
   }, [items, searchText]);
 
   const linkedCount = Object.values(agentVars).filter(Boolean).length;
-  const enabledCount = Object.values(itemVars).filter(Boolean).length;
-  const disabledCount = Object.keys(itemVars).length - enabledCount;
 
   // ── Render ───────────────────────────────────────────────────
 
@@ -329,6 +447,47 @@ function App() {
             Unified Capability Management for Agents
           </p>
         </div>
+        
+        {/* Profile Selector */}
+        <div className="flex items-center gap-3 bg-[#1E293B]/50 px-3 py-1.5 rounded-lg border border-slate-700/50">
+          <span className="text-xs text-slate-400 font-medium">Profile:</span>
+          <select 
+            value={currentProfile.name}
+            onChange={handleSelectProfile}
+            className="bg-[#0F172A] border border-slate-700/50 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50"
+          >
+            <option value="Custom">Custom (未保存)</option>
+            {profiles.map(p => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+          <div className="flex items-center gap-1 border-l border-slate-700/50 pl-2">
+            <button
+              onClick={() => openSaveProfileModal(false)}
+              disabled={currentProfile.name === "Custom"}
+              title="保存配置"
+              className="p-1 text-slate-400 hover:text-emerald-400 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors"
+            >
+              <Save className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => openSaveProfileModal(true)}
+              title="另存为新 Profile"
+              className="p-1 text-slate-400 hover:text-emerald-400 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleDeleteProfile}
+              disabled={currentProfile.name === "Custom"}
+              title="删除 Profile"
+              className="p-1 text-slate-400 hover:text-rose-400 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
         <div className="flex items-center gap-3">
           <button
             onClick={handleConfigureRepo}
@@ -346,9 +505,6 @@ function App() {
                 <FolderOpen className="w-3.5 h-3.5" />
                 打开仓库
               </button>
-              <span className="text-xs text-slate-400 max-w-md truncate bg-[#1E293B]/50 px-2.5 py-1 rounded-md border border-slate-800">
-                仓库：{config.repo_root}
-              </span>
             </>
           )}
           {!config.repo_root && (
@@ -392,7 +548,7 @@ function App() {
                     onChange={() => {
                       setAgentVars((prev) => {
                         const next = { ...prev, [t.id]: !prev[t.id] };
-                        updateStatus(next, itemVars);
+                        updateStatus(next, currentProfile);
                         return next;
                       });
                     }}
@@ -471,20 +627,6 @@ function App() {
               <RefreshCw className="w-3.5 h-3.5" />
               刷新
             </button>
-            <button
-              onClick={handleOpenEnabled}
-              className="px-3 py-1.5 flex items-center gap-1.5 text-xs font-medium bg-[#1E293B] border border-slate-700/50 rounded-md hover:bg-slate-700 hover:text-slate-200 active:scale-95 transition-all whitespace-nowrap text-slate-300"
-            >
-              <FolderOpen className="w-3.5 h-3.5" />
-              enabled
-            </button>
-            <button
-              onClick={handleOpenDisabled}
-              className="px-3 py-1.5 flex items-center gap-1.5 text-xs font-medium bg-[#1E293B] border border-slate-700/50 rounded-md hover:bg-slate-700 hover:text-slate-200 active:scale-95 transition-all whitespace-nowrap text-slate-300"
-            >
-              <FolderOpen className="w-3.5 h-3.5" />
-              disabled
-            </button>
           </div>
 
           {/* Item list */}
@@ -500,91 +642,35 @@ function App() {
               </div>
             )}
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-              {filteredItems.map((item) => (
-                <label
-                  key={item.name}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[#1E293B]/20 hover:bg-[#1E293B]/80 border border-transparent hover:border-slate-700/50 cursor-pointer transition-all active:scale-[0.98] group"
-                >
-                  <div className="flex-shrink-0 pt-0.5">
-                    <input
-                      type="checkbox"
-                      checked={itemVars[item.name] ?? item.enabled}
-                      onChange={() => {
-                        setItemVars((prev) => {
-                          const next = { ...prev, [item.name]: !prev[item.name] };
-                          updateStatus(agentVars, next);
-                          return next;
-                        });
-                      }}
-                      className="w-4 h-4 text-emerald-500 border-slate-600 bg-slate-800 rounded focus:ring-emerald-500/30 focus:ring-2 focus:ring-offset-0 cursor-pointer transition-colors"
-                    />
-                  </div>
-                  <span className="text-xs font-medium text-slate-300 group-hover:text-emerald-400 transition-colors truncate">
-                    {item.name}
-                  </span>
-                </label>
-              ))}
+              {filteredItems.map((item) => {
+                const isEnabled = currentProfile[currentType].includes(item.name);
+                return (
+                  <label
+                    key={item.name}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[#1E293B]/20 hover:bg-[#1E293B]/80 border border-transparent hover:border-slate-700/50 cursor-pointer transition-all active:scale-[0.98] group"
+                  >
+                    <div className="flex-shrink-0 pt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={isEnabled}
+                        onChange={() => toggleItem(item.name)}
+                        className="w-4 h-4 text-emerald-500 border-slate-600 bg-slate-800 rounded focus:ring-emerald-500/30 focus:ring-2 focus:ring-offset-0 cursor-pointer transition-colors"
+                      />
+                    </div>
+                    <span className="text-xs font-medium text-slate-300 group-hover:text-emerald-400 transition-colors truncate">
+                      {item.name}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           </div>
         </main>
-
-        {/* Log panel toggle */}
-        <div className="flex-shrink-0 flex flex-col items-center justify-center w-8 bg-[#0F172A] hover:bg-[#1E293B] transition-colors cursor-pointer border-l border-slate-800/80 z-10"
-             onClick={() => setShowLogs(!showLogs)}
-             title={showLogs ? "关闭日志" : "打开日志"}>
-          {showLogs ? (
-            <ChevronRight className="w-4 h-4 text-slate-500" />
-          ) : (
-            <ChevronLeft className="w-4 h-4 text-slate-500" />
-          )}
-          <span className="text-[10px] text-slate-500 leading-tight text-center select-none mt-2 rotate-180" style={{ writingMode: 'vertical-rl' }}>
-            执 行 日 志
-          </span>
-        </div>
-
-        {/* Log panel (collapsible right sidebar) */}
-        <aside className={`flex-shrink-0 bg-[#0A0F1C] border-l border-slate-800/80 flex flex-col transition-all duration-300 ease-in-out ${showLogs ? 'w-80 opacity-100' : 'w-0 opacity-0 overflow-hidden border-none'}`}>
-          <div className="px-4 py-3 border-b border-slate-800/80 flex items-center justify-between bg-[#0F172A]">
-            <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <Terminal className="w-3.5 h-3.5 text-emerald-500" />
-              执行日志
-            </h3>
-            <button
-              onClick={() => setLogs([])}
-              className="text-xs text-slate-500 hover:text-slate-300 hover:bg-slate-800 px-2 py-1 rounded transition-colors"
-            >
-              清空
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed space-y-1 select-text">
-            {logs.length === 0 ? (
-              <p className="text-slate-600 italic">暂无活动记录。</p>
-            ) : (
-              logs.map((log, i) => (
-                <div key={i} className="break-words">
-                  <span
-                    className={
-                      log.startsWith("[!]") || log.includes("错误")
-                        ? "text-rose-400"
-                        : log.startsWith("[+]") || log.includes("成功") || log.includes("完成")
-                          ? "text-emerald-400"
-                          : log.startsWith("[-]")
-                            ? "text-amber-400"
-                            : "text-slate-300"
-                    }
-                  >
-                    {log}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </aside>
       </div>
 
       {/* Bottom action bar */}
-      <footer className="flex-shrink-0 bg-[#0F172A] border-t border-slate-800/80 px-6 py-3 flex items-center justify-between shadow-sm z-10">
-        <div className="text-xs font-medium text-slate-400">
+      <footer className="flex-shrink-0 bg-[#0F172A] border-t border-slate-800/80 px-6 py-3 flex items-center justify-between shadow-sm z-10 relative">
+        <div className="text-xs font-medium text-slate-400 flex items-center gap-6">
           {config.repo_root
             ? (
               <div className="flex items-center gap-4">
@@ -593,13 +679,33 @@ function App() {
                   已链接 Agent：{linkedCount}
                 </span>
                 <span className="flex items-center gap-1.5 border-l border-slate-700 pl-4">
-                  <span className="text-emerald-400">{enabledCount} 启用</span>
+                  <span className="text-emerald-400">{currentProfile[currentType].length} 启用</span>
                   <span className="text-slate-600">/</span>
-                  <span className="text-slate-500">{disabledCount} 禁用</span>
+                  <span className="text-slate-500">{items.length - currentProfile[currentType].length} 禁用</span>
                 </span>
               </div>
             )
             : "请先配置仓库路径"}
+            
+            {/* Version & Update Button */}
+            <div className="flex items-center gap-2 border-l border-slate-700 pl-4 ml-2">
+              <span className="text-slate-500">v{appVersion}</span>
+              <button 
+                onClick={handleCheckUpdate}
+                disabled={isCheckingUpdate}
+                className="text-[10px] px-2 py-0.5 rounded bg-[#1E293B] hover:bg-slate-700 text-slate-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isCheckingUpdate ? "检查中..." : "检查更新"}
+              </button>
+            </div>
+            
+            {/* View Logs Button */}
+            <button 
+              onClick={() => setShowLogModal(true)} 
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md hover:bg-[#1E293B] text-slate-400 hover:text-emerald-400 transition-colors border border-transparent hover:border-slate-700/50"
+            >
+              <Terminal className="w-4 h-4" /> 执行日志
+            </button>
         </div>
         <button
           onClick={handleSaveAndSync}
@@ -619,6 +725,127 @@ function App() {
           )}
         </button>
       </footer>
+
+      {/* Modals & Overlays */}
+      {toast && (
+        <div className={`fixed top-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-lg shadow-lg border flex items-center gap-2 animate-in slide-in-from-top-4 fade-in duration-300
+          ${toast.type === 'success' ? 'bg-emerald-950/90 border-emerald-800 text-emerald-300' :
+            toast.type === 'error' ? 'bg-rose-950/90 border-rose-800 text-rose-300' :
+            'bg-slate-800/90 border-slate-700 text-slate-300'}`}>
+          {toast.type === 'success' && <CheckCircle2 className="w-4 h-4" />}
+          {toast.type === 'error' && <AlertCircle className="w-4 h-4" />}
+          {toast.type === 'info' && <Info className="w-4 h-4" />}
+          <span className="text-sm font-medium">{toast.text}</span>
+        </div>
+      )}
+
+      {profileModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-[#0F172A] border border-slate-700/80 rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-200">
+                {profileModal.isNew ? "另存为新 Profile" : "保存 Profile"}
+              </h3>
+              <button onClick={() => setProfileModal({...profileModal, isOpen: false})} className="text-slate-400 hover:text-slate-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5">
+              <label className="block text-xs font-medium text-slate-400 mb-2">Profile 名称</label>
+              <input
+                autoFocus
+                type="text"
+                value={profileModal.inputName}
+                onChange={e => setProfileModal({...profileModal, inputName: e.target.value})}
+                placeholder="输入名称..."
+                className="w-full px-3 py-2 bg-[#1E293B] border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                onKeyDown={e => { if (e.key === 'Enter') confirmSaveProfile(); }}
+              />
+            </div>
+            <div className="px-5 py-4 bg-[#0A0F1C] border-t border-slate-800 flex justify-end gap-3">
+              <button onClick={() => setProfileModal({...profileModal, isOpen: false})} className="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-[#1E293B] transition-colors">
+                取消
+              </button>
+              <button onClick={confirmSaveProfile} disabled={!profileModal.inputName.trim()} className="px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-[#0F172A] border border-slate-700/80 rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-full bg-rose-500/10 flex items-center justify-center flex-shrink-0">
+                  <AlertCircle className="w-5 h-5 text-rose-500" />
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold text-slate-200 mb-2">确认操作</h3>
+                  <p className="text-sm text-slate-400 leading-relaxed">{confirmModal.message}</p>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 bg-[#0A0F1C] border-t border-slate-800 flex justify-end gap-3">
+              <button onClick={() => setConfirmModal({...confirmModal, isOpen: false})} className="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-[#1E293B] transition-colors">
+                取消
+              </button>
+              <button onClick={confirmModal.onConfirm} className="px-4 py-2 rounded-lg text-sm font-medium bg-rose-600 hover:bg-rose-500 text-white transition-colors">
+                {confirmModal.confirmText || "确认"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLogModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm">
+          <div className="bg-[#0F172A] border border-slate-700/80 rounded-xl shadow-2xl w-full max-w-4xl flex flex-col h-[80vh] overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between bg-[#1E293B]/30">
+              <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-emerald-500" />
+                执行日志
+              </h3>
+              <div className="flex items-center gap-4">
+                <button onClick={() => setLogs([])} className="text-xs font-medium text-slate-400 hover:text-slate-200 px-3 py-1.5 rounded bg-[#1E293B]/50 hover:bg-[#1E293B] transition-colors">
+                  清空日志
+                </button>
+                <button onClick={() => setShowLogModal(false)} className="text-slate-400 hover:text-slate-200 transition-colors p-1 bg-transparent hover:bg-slate-800 rounded">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 font-mono text-[13px] leading-relaxed space-y-1.5 select-text bg-[#0A0F1C]">
+              {logs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-slate-600 gap-3">
+                  <Terminal className="w-12 h-12 opacity-30" />
+                  <p className="italic">暂无活动记录。</p>
+                </div>
+              ) : (
+                logs.map((log, i) => (
+                  <div key={i} className="break-words">
+                    <span
+                      className={
+                        log.startsWith("[!]") || log.includes("错误")
+                          ? "text-rose-400"
+                          : log.startsWith("[+]") || log.includes("成功") || log.includes("完成")
+                            ? "text-emerald-400"
+                            : log.startsWith("[-]")
+                              ? "text-amber-400"
+                              : "text-slate-300"
+                      }
+                    >
+                      {log}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

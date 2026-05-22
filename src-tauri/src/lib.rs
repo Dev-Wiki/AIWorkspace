@@ -47,6 +47,15 @@ pub struct SyncResult {
     pub has_errors: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Profile {
+    pub name: String,
+    pub skills: Vec<String>,
+    pub rules: Vec<String>,
+    pub plugins: Vec<String>,
+    pub mcps: Vec<String>,
+}
+
 // ── Constants ────────────────────────────────────────────────────
 
 const CONTENT_TYPES: &[&str] = &["skills", "rules", "plugins", "mcps"];
@@ -319,6 +328,46 @@ fn all_targets() -> Vec<AgentTarget> {
             name: "LM Studio Plugins".into(),
             content_type: "plugins".into(),
             path: format!("{}/.lmstudio/extensions/plugins", home),
+            backend: "local".into(),
+            available: false,
+        },
+        AgentTarget {
+            id: "deepseek-tui-skills".into(),
+            name: "DeepSeek TUI Skills".into(),
+            content_type: "skills".into(),
+            path: format!("{}/.deepseek/skills", home),
+            backend: "local".into(),
+            available: false,
+        },
+        AgentTarget {
+            id: "deepseek-tui-rules".into(),
+            name: "DeepSeek TUI Rules".into(),
+            content_type: "rules".into(),
+            path: format!("{}/.deepseek/rules", home),
+            backend: "local".into(),
+            available: false,
+        },
+        AgentTarget {
+            id: "windsurf-skills".into(),
+            name: "Windsurf Skills".into(),
+            content_type: "skills".into(),
+            path: format!("{}/.windsurf/skills", home),
+            backend: "local".into(),
+            available: false,
+        },
+        AgentTarget {
+            id: "continue-skills".into(),
+            name: "Continue Skills".into(),
+            content_type: "skills".into(),
+            path: format!("{}/.continue/skills", home),
+            backend: "local".into(),
+            available: false,
+        },
+        AgentTarget {
+            id: "continue-rules".into(),
+            name: "Continue Rules".into(),
+            content_type: "rules".into(),
+            path: format!("{}/.continue/rules", home),
             backend: "local".into(),
             available: false,
         },
@@ -880,6 +929,108 @@ fn get_repo_default() -> String {
         .unwrap_or_else(|| ".ai".into())
 }
 
+// ── Profiles ─────────────────────────────────────────────────────
+
+fn profiles_dir() -> PathBuf {
+    app_config_dir().join("profiles")
+}
+
+#[tauri::command]
+fn get_profiles() -> Vec<Profile> {
+    let dir = profiles_dir();
+    let mut profiles = Vec::new();
+    if dir.exists() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(mut profile) = serde_json::from_str::<Profile>(&content) {
+                            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                                profile.name = stem.to_string();
+                            }
+                            profiles.push(profile);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    profiles.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    profiles
+}
+
+#[tauri::command]
+fn save_profile(profile: Profile) -> Result<(), String> {
+    let dir = profiles_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create profiles dir: {}", e))?;
+    let safe_name = profile.name.replace(&['/', '\\', '.', ':'][..], "_");
+    if safe_name.is_empty() { return Err("Invalid profile name".into()); }
+    let path = dir.join(format!("{}.json", safe_name));
+    let json = serde_json::to_string_pretty(&profile).map_err(|e| format!("Serialization error: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Write error: {}", e))
+}
+
+#[tauri::command]
+fn delete_profile(name: String) -> Result<(), String> {
+    let safe_name = name.replace(&['/', '\\', '.', ':'][..], "_");
+    if safe_name.is_empty() { return Err("Invalid profile name".into()); }
+    let path = profiles_dir().join(format!("{}.json", safe_name));
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| format!("Delete error: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn apply_profile_and_sync(repo_root: String, profile: Profile, selected_agents: Vec<String>) -> Result<SyncResult, String> {
+    let _ = save_config_to_disk(&Some(repo_root.clone()), &selected_agents);
+    
+    // First, enforce profile logic
+    for ct in CONTENT_TYPES {
+        let desired_items = match *ct {
+            "skills" => &profile.skills,
+            "rules" => &profile.rules,
+            "plugins" => &profile.plugins,
+            "mcps" => &profile.mcps,
+            _ => continue,
+        };
+
+        let ed = enabled_dir(&repo_root, ct);
+        let dd = disabled_dir(&repo_root, ct);
+        
+        let _ = fs::create_dir_all(&ed);
+        let _ = fs::create_dir_all(&dd);
+
+        // Move items currently in enabled but not in desired -> disabled
+        if let Ok(entries) = fs::read_dir(&ed) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !desired_items.contains(&name) {
+                    let _ = fs::rename(entry.path(), dd.join(&name));
+                }
+            }
+        }
+
+        // Move items currently in disabled but in desired -> enabled
+        if let Ok(entries) = fs::read_dir(&dd) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if desired_items.contains(&name) {
+                    let _ = fs::rename(entry.path(), ed.join(&name));
+                }
+            }
+        }
+    }
+
+    // Now call sync
+    let (log, has_errors) = sync_links(&repo_root, &selected_agents);
+    Ok(SyncResult {
+        log,
+        moved_count: 0,
+        has_errors,
+    })
+}
+
 // ── App Entry ────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -896,6 +1047,10 @@ pub fn run() {
             save_and_sync,
             open_directory,
             get_repo_default,
+            get_profiles,
+            save_profile,
+            delete_profile,
+            apply_profile_and_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
