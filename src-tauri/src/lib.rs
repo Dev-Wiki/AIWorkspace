@@ -657,6 +657,9 @@ fn move_item_internal(repo: &str, content_type: &str, name: &str, enabled: bool)
 // ── Sync Links ───────────────────────────────────────────────────
 
 fn sync_links(repo: &str, selected_agents: &[String]) -> (String, bool) {
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let targets = scan_available_targets();
     let mut log_lines: Vec<String> = Vec::new();
     let mut has_errors = false;
@@ -689,6 +692,25 @@ fn sync_links(repo: &str, selected_agents: &[String]) -> (String, bool) {
                     } else {
                         log_lines.push(format!("[ ] Skipped {}", t.name));
                     }
+
+                    // WSL Extra link clean up
+                    if t.id == "wsl-antigravity-skills" || t.id == "wsl-antigravity-ide-skills" {
+                        let extra_wsl_path = "~/.gemini/config/skills".to_string();
+                        if !selected_agents.contains(&"wsl-antigravity-skills".to_string())
+                            && !selected_agents.contains(&"wsl-antigravity-ide-skills".to_string())
+                        {
+                            if is_wsl_managed_link(&extra_wsl_path, repo) {
+                                let _ = run_wsl_shell(&format!(
+                                    "if [ -L {} ]; then rm {}; elif [ -d {} ]; then rmdir {}; else rm -f {}; fi",
+                                    shlex_quote(&extra_wsl_path), shlex_quote(&extra_wsl_path),
+                                    shlex_quote(&extra_wsl_path), shlex_quote(&extra_wsl_path),
+                                    shlex_quote(&extra_wsl_path)
+                                ));
+                                log_lines.push("[-] Unlinked WSL Antigravity 2.0 Extra Skill Link".into());
+                            }
+                        }
+                    }
+
                     continue;
                 }
 
@@ -735,6 +757,54 @@ fn sync_links(repo: &str, selected_agents: &[String]) -> (String, bool) {
                                 has_errors = true;
                             }
                         }
+
+                        // WSL Extra Link creation
+                        if t.id == "wsl-antigravity-skills" || t.id == "wsl-antigravity-ide-skills" {
+                            let extra_wsl_path = "~/.gemini/config/skills".to_string();
+                            let mut should_link_extra = true;
+                            if wsl_path_exists_or_link(&extra_wsl_path) {
+                                if is_wsl_managed_link(&extra_wsl_path, repo) {
+                                    let _ = run_wsl_shell(&format!(
+                                        "if [ -L {} ]; then rm {}; elif [ -d {} ]; then rmdir {}; else rm -f {}; fi",
+                                        shlex_quote(&extra_wsl_path), shlex_quote(&extra_wsl_path),
+                                        shlex_quote(&extra_wsl_path), shlex_quote(&extra_wsl_path),
+                                        shlex_quote(&extra_wsl_path)
+                                    ));
+                                } else {
+                                    match backup_existing_wsl(&extra_wsl_path) {
+                                        Ok(_) => log_lines.push("[-] Backed up existing WSL Antigravity 2.0 Extra Skill Link to .bak".into()),
+                                        Err(e) => {
+                                            log_lines.push(format!("[!] Error backing up WSL Antigravity 2.0 Extra Skill Link: {}", e));
+                                            has_errors = true;
+                                            should_link_extra = false;
+                                        }
+                                    }
+                                }
+                            }
+                            if should_link_extra {
+                                let extra_parent = "~/.gemini/config".to_string();
+                                let extra_result = run_wsl_shell(&format!(
+                                    "mkdir -p {} && ln -s {} {}",
+                                    shlex_quote(&extra_parent),
+                                    shlex_quote(&wsl_source),
+                                    shlex_quote(&extra_wsl_path)
+                                ));
+                                match extra_result {
+                                    Ok(o) if o.status.success() => {
+                                        log_lines.push("[+] Linked WSL Antigravity 2.0 Extra Skill Link".into());
+                                    }
+                                    Ok(o) => {
+                                        log_lines.push(format!("[!] Error linking WSL Antigravity 2.0 Extra Skill Link: {}",
+                                            String::from_utf8_lossy(&o.stderr)));
+                                        has_errors = true;
+                                    }
+                                    Err(e) => {
+                                        log_lines.push(format!("[!] Error linking WSL Antigravity 2.0 Extra Skill Link: {}", e));
+                                        has_errors = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         log_lines.push(format!("[!] Error converting path for {}: {}", t.name, e));
@@ -757,6 +827,20 @@ fn sync_links(repo: &str, selected_agents: &[String]) -> (String, bool) {
                 } else {
                     log_lines.push(format!("[ ] Skipped {}", t.name));
                 }
+
+                // Local Extra link clean up
+                if t.id == "antigravity-skills" || t.id == "antigravity-ide-skills" {
+                    let extra_path = expanded_path(&format!("{}/.gemini/config/skills", home));
+                    if !selected_agents.contains(&"antigravity-skills".to_string())
+                        && !selected_agents.contains(&"antigravity-ide-skills".to_string())
+                    {
+                        if is_managed_link(&extra_path, repo) {
+                            let _ = remove_link(&extra_path);
+                            log_lines.push("[-] Unlinked Antigravity 2.0 Extra Skill Link".into());
+                        }
+                    }
+                }
+
                 continue;
             }
 
@@ -782,6 +866,37 @@ fn sync_links(repo: &str, selected_agents: &[String]) -> (String, bool) {
                 Err(e) => {
                     log_lines.push(format!("[!] Error linking {}: {}", t.name, e));
                     has_errors = true;
+                }
+            }
+
+            // Local Extra Link creation
+            if t.id == "antigravity-skills" || t.id == "antigravity-ide-skills" {
+                let extra_path = expanded_path(&format!("{}/.gemini/config/skills", home));
+                let mut should_link_extra = true;
+                if extra_path.exists() || extra_path.is_symlink() {
+                    if is_managed_link(&extra_path, repo) {
+                        let _ = remove_link(&extra_path);
+                    } else {
+                        match backup_existing(&extra_path) {
+                            Ok(_) => log_lines.push("[-] Backed up existing Antigravity 2.0 Extra Skill Link to .bak".into()),
+                            Err(e) => {
+                                log_lines.push(format!("[!] Error backing up Antigravity 2.0 Extra Skill Link: {}", e));
+                                has_errors = true;
+                                should_link_extra = false;
+                            }
+                        }
+                    }
+                }
+                if should_link_extra {
+                    match create_directory_link(&extra_path, &source) {
+                        Ok(_) => {
+                            log_lines.push("[+] Linked Antigravity 2.0 Extra Skill Link".into());
+                        }
+                        Err(e) => {
+                            log_lines.push(format!("[!] Error linking Antigravity 2.0 Extra Skill Link: {}", e));
+                            has_errors = true;
+                        }
+                    }
                 }
             }
         }

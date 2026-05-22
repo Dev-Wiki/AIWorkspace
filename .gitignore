@@ -27,3 +27,4 @@ dist-ssr
 .vscode/
 .antigravity/
 package-lock.json
+.agent/

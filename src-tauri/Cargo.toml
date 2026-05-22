@@ -1,6 +1,6 @@
 [package]
 name = "ai-workspace"
-version = "0.1.2"
+version = "0.1.3"
 description = "AI Workspace - Unified Capability Management for Agents"
 authors = ["you"]
 edition = "2021"

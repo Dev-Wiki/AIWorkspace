@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.3] - 2026-05-22
+
+### Fixed
+- 兼容 Antigravity 2.0，在同步 skills 时额外添加 `~/.gemini/config/skills` 的兼容链接。
+
 ## [v0.1.2] - 2026-05-21
 
 ### Changed
