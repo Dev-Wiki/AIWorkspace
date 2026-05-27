@@ -276,6 +276,14 @@ fn all_targets() -> Vec<AgentTarget> {
             available: false,
         },
         AgentTarget {
+            id: "wsl-claude".into(),
+            name: "WSL Claude CLI".into(),
+            content_type: "skills".into(),
+            path: "~/.claude/skills".into(),
+            backend: "wsl".into(),
+            available: false,
+        },
+        AgentTarget {
             id: "trae-skills".into(),
             name: "Trae Skills".into(),
             content_type: "skills".into(),
