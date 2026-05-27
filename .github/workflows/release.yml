@@ -68,7 +68,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          Compress-Archive -Path "src-tauri/target/release/AI Workspace.exe" -DestinationPath "AI.Workspace_${{ github.ref_name }}_x64_portable.zip"
+          Compress-Archive -Path "src-tauri/target/release/ai-workspace.exe" -DestinationPath "AI.Workspace_${{ github.ref_name }}_x64_portable.zip"
 
       - name: Upload Portable Windows Version to Release
         if: matrix.platform == 'windows-latest'
