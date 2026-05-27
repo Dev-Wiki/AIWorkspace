@@ -54,6 +54,7 @@ jobs:
 
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -68,11 +69,11 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          Compress-Archive -Path "src-tauri/target/release/ai-workspace.exe" -DestinationPath "AI.Workspace_${{ github.ref_name }}_x64_portable.zip"
+          Copy-Item -Path "src-tauri/target/release/ai-workspace.exe" -Destination "AI.Workspace_${{ steps.tauri.outputs.appVersion }}_x64-portable.exe"
 
       - name: Upload Portable Windows Version to Release
         if: matrix.platform == 'windows-latest'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.ref_name }} AI.Workspace_${{ github.ref_name }}_x64_portable.zip --clobber
+          gh release upload ${{ github.ref_name }} AI.Workspace_${{ steps.tauri.outputs.appVersion }}_x64-portable.exe --clobber
